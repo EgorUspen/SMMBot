@@ -16,7 +16,7 @@ from telegram.ext import (
     ContextTypes, filters, ConversationHandler
 )
 
-
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 # States
 CHOOSING, SHORTEN, VIDEO = range(3)
 
@@ -151,10 +151,10 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data['state'] = CHOOSING
     return CHOOSING
 
+    
 # Main
 def main():
     # Use environment variable for production, fallback to your token for development
-    TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
     
     app = ApplicationBuilder().token(TOKEN).build()
 

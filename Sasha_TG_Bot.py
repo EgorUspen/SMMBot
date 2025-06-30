@@ -70,30 +70,30 @@ async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     choice = update.message.text
     context.user_data['state'] = CHOOSING
 
-    if choice == 'Generate short URL':
+    if choice == '🔗':
         await update.message.reply_text("Send the URL to shorten:", reply_markup=ReplyKeyboardRemove())
         context.user_data['state'] = SHORTEN
         return SHORTEN
-    elif choice == 'Generate UTM short URL':
-        await update.message.reply_text("🔗 Creating UTM tracking URL!\n\nFirst, send the URL you want to track:", reply_markup=ReplyKeyboardRemove())
+    elif choice == '🔗 UTM':
+        await update.message.reply_text("Creating UTM tracking URL!\n\nFirst, send the URL you want to track:", reply_markup=ReplyKeyboardRemove())
         context.user_data['state'] = UTM_URL
         # Clear any previous UTM data
         context.user_data.pop('utm_url', None)
         context.user_data.pop('utm_source', None)
         context.user_data.pop('utm_campaign', None)
         return UTM_URL
-    elif choice == 'Generate round video':
+    elif choice == '📷':
         await update.message.reply_text("Send a video (max 50MB, square, up to 1 minute):", reply_markup=ReplyKeyboardRemove())
         context.user_data['state'] = VIDEO
         return VIDEO
-    elif choice == 'Create Vinyl':
-        await update.message.reply_text("🎵 Creating a vinyl record!\n\nFirst, send an image for the vinyl cover:", reply_markup=ReplyKeyboardRemove())
+    elif choice == '💿':
+        await update.message.reply_text("Creating a vinyl record!\n\nFirst, send an image for the vinyl cover:", reply_markup=ReplyKeyboardRemove())
         context.user_data['state'] = VINYL_IMAGE
         # Clear any previous vinyl data
         context.user_data.pop('vinyl_image_path', None)
         context.user_data.pop('vinyl_audio_path', None)
         return VINYL_IMAGE
-    elif choice == 'Stop session':
+    elif choice == '⏹️':
         return await stop(update, context)
     else:
         await update.message.reply_text("Choose a valid option.", reply_markup=markup)

@@ -25,7 +25,7 @@ CHOOSING, SHORTEN, VIDEO, VINYL_IMAGE, VINYL_AUDIO, UTM_URL, UTM_SOURCE, UTM_CAM
 UTM_SOURCE_CHOICE, UTM_CAMPAIGN_CHOICE = range(8, 10)
 
 # Keyboard
-reply_keyboard = [['Generate short URL', 'Generate UTM short URL', 'Generate round video', 'Create Vinyl', 'Stop session']]
+reply_keyboard = [['🔗', '🔗 UTM', '📷', '💿', '🛑']]
 markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True)
 
 # Start

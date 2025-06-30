@@ -7,6 +7,7 @@ from typing import cast
 import time
 import subprocess
 import numpy as np
+import asyncio
 
 from telegram import (
     Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InputFile, Bot
@@ -16,12 +17,13 @@ from telegram.ext import (
     ContextTypes, filters, ConversationHandler
 )
 
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+# TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN','8160463472:AAGzZTjwp9oI4sjhsSU72OcoccELIYyNH5Q')
 # States
-CHOOSING, SHORTEN, VIDEO = range(3)
+CHOOSING, SHORTEN, VIDEO, VINYL_IMAGE, VINYL_AUDIO = range(5)
 
 # Keyboard
-reply_keyboard = [['Generate short URL', 'Generate round video', 'Stop session']]
+reply_keyboard = [['Generate short URL', 'Generate round video', 'Create Vinyl', 'Stop session']]
 markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True)
 
 # Start
@@ -38,7 +40,13 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     current_state = "Unknown"
     if hasattr(context, 'user_data') and 'state' in context.user_data:
-        state_map = {CHOOSING: "Main Menu", SHORTEN: "Waiting for URL", VIDEO: "Waiting for Video"}
+        state_map = {
+            CHOOSING: "Main Menu", 
+            SHORTEN: "Waiting for URL", 
+            VIDEO: "Waiting for Video",
+            VINYL_IMAGE: "Waiting for Vinyl Image",
+            VINYL_AUDIO: "Waiting for Vinyl Audio"
+        }
         current_state = state_map.get(context.user_data['state'], "Unknown")
     
     menu_text = f"📋 Current State: {current_state}\n\n"
@@ -65,6 +73,13 @@ async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await update.message.reply_text("Send a video (max 50MB, square, up to 1 minute):", reply_markup=ReplyKeyboardRemove())
         context.user_data['state'] = VIDEO
         return VIDEO
+    elif choice == 'Create Vinyl':
+        await update.message.reply_text("🎵 Creating a vinyl record!\n\nFirst, send an image for the vinyl cover:", reply_markup=ReplyKeyboardRemove())
+        context.user_data['state'] = VINYL_IMAGE
+        # Clear any previous vinyl data
+        context.user_data.pop('vinyl_image_path', None)
+        context.user_data.pop('vinyl_audio_path', None)
+        return VINYL_IMAGE
     elif choice == 'Stop session':
         return await stop(update, context)
     else:
@@ -145,17 +160,298 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     context.user_data['state'] = CHOOSING
     return CHOOSING
 
+# Handle vinyl image upload
+async def handle_vinyl_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Check if user sent an image
+    if not (update.message.photo or (update.message.document and update.message.document.mime_type and update.message.document.mime_type.startswith('image/'))):
+        await update.message.reply_text("Please send a valid image file (JPEG, PNG, etc.)")
+        return VINYL_IMAGE
+    
+    try:
+        # Get the image file
+        if update.message.photo:
+            # Get the largest photo size
+            photo = update.message.photo[-1]
+            file = await photo.get_file()
+        else:
+            # Document image
+            file = await update.message.document.get_file()
+        
+        # Download image
+        image_path = "vinyl_image." + file.file_path.split('.')[-1]
+        await file.download_to_drive(image_path)
+        
+        # Store image path in user data
+        context.user_data['vinyl_image_path'] = image_path
+        
+        await update.message.reply_text("✅ Image received! Now send an audio file (MP3, WAV, etc.):")
+        context.user_data['state'] = VINYL_AUDIO
+        return VINYL_AUDIO
+        
+    except Exception as e:
+        await update.message.reply_text(f"Error processing image: {str(e)}")
+        return VINYL_IMAGE
+
+# Handle vinyl audio upload
+async def handle_vinyl_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Check if user sent an audio file
+    audio = update.message.audio or update.message.voice or update.message.document
+    
+    if not audio:
+        await update.message.reply_text("Please send a valid audio file (MP3, WAV, etc.)")
+        return VINYL_AUDIO
+    
+    # Check if document is audio
+    if hasattr(audio, 'mime_type') and audio.mime_type and not audio.mime_type.startswith('audio/'):
+        await update.message.reply_text("Please send a valid audio file")
+        return VINYL_AUDIO
+    
+    try:
+        # Send initial processing message
+        processing_msg = await update.message.reply_text("🎵 Processing vinyl... This may take a moment!")
+        
+        # Download audio
+        file = await audio.get_file()
+        audio_path = "vinyl_audio." + (file.file_path.split('.')[-1] if '.' in file.file_path else 'mp3')
+        await file.download_to_drive(audio_path)
+        
+        # Store audio path
+        context.user_data['vinyl_audio_path'] = audio_path
+        
+        # Create vinyl video with better error handling
+        try:
+            await create_vinyl_video_async(update, context, processing_msg)
+        except asyncio.TimeoutError:
+            # This shouldn't happen now, but just in case
+            await update.message.reply_text("⚠️ Processing is taking longer than expected, but your vinyl is still being created...")
+            # Continue processing in background
+            asyncio.create_task(create_vinyl_video_background(update, context))
+        
+    except Exception as e:
+        await update.message.reply_text(f"Error processing audio: {str(e)}")
+        # Clean up files
+        cleanup_vinyl_files(context)
+        
+    context.user_data['state'] = CHOOSING
+    return CHOOSING
+
+# Create spinning vinyl video with async handling
+async def create_vinyl_video_async(update: Update, context: ContextTypes.DEFAULT_TYPE, processing_msg=None):
+    """Main vinyl creation function with proper async handling"""
+    try:
+        # Run the heavy processing in a thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        success = await loop.run_in_executor(None, create_vinyl_video_sync, update, context)
+        
+        if success:
+            # Send the video
+            await send_vinyl_video(update, context)
+            if processing_msg:
+                try:
+                    await processing_msg.delete()
+                except:
+                    pass  # Ignore if message can't be deleted
+        else:
+            await update.message.reply_text("Failed to create vinyl video")
+            
+    except Exception as e:
+        await update.message.reply_text(f"Failed to create vinyl: {str(e)}")
+    finally:
+        # Clean up all files
+        cleanup_vinyl_files(context)
+
+# Background task for vinyl creation (fallback)
+async def create_vinyl_video_background(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Background task for when main processing times out"""
+    try:
+        loop = asyncio.get_event_loop()
+        success = await loop.run_in_executor(None, create_vinyl_video_sync, update, context)
+        
+        if success:
+            await send_vinyl_video(update, context)
+        else:
+            await update.message.reply_text("Failed to create vinyl video in background")
+            
+    except Exception as e:
+        await update.message.reply_text(f"Background vinyl creation failed: {str(e)}")
+    finally:
+        cleanup_vinyl_files(context)
+
+# Synchronous vinyl creation (the heavy lifting)
+def create_vinyl_video_sync(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Synchronous video creation that runs in thread pool"""
+    image_path = context.user_data.get('vinyl_image_path')
+    audio_path = context.user_data.get('vinyl_audio_path')
+    output_path = "vinyl_video.mp4"
+    vinyl_overlay_path = "vinyl_overlay.png"
+    
+    try:
+        # Load audio and limit to 60 seconds
+        audio_clip = AudioFileClip(audio_path)
+        duration = min(audio_clip.duration, 60)
+        audio_clip = audio_clip.subclipped(0, duration)
+        
+        # Load and process user's image
+        user_image_clip = ImageClip(image_path, duration=duration)
+        
+        # Make user image square and resize
+        size = min(user_image_clip.w, user_image_clip.h)
+        crop_effect = Crop(x_center=user_image_clip.w / 2, y_center=user_image_clip.h / 2, width=size, height=size)
+        user_image_clip = user_image_clip.with_effects([crop_effect])
+        
+        target_size = 512
+        user_image_clip = user_image_clip.resized((target_size, target_size))
+        
+        # Create vinyl blend effect
+        def create_vinyl_blend(get_frame, t):
+            from PIL import Image as PILImage, ImageEnhance
+            import numpy as np
+            
+            # Get user's image frame
+            user_frame = get_frame(t)
+            user_pil = PILImage.fromarray(user_frame.astype('uint8')).convert('RGB')
+            
+            # Load vinyl overlay (do this once and cache if needed)
+            if os.path.exists(vinyl_overlay_path):
+                vinyl_pil = PILImage.open(vinyl_overlay_path).convert('RGB')
+                vinyl_pil = vinyl_pil.resize((target_size, target_size), PILImage.Resampling.LANCZOS)
+                
+                # Convert images to numpy arrays for blending
+                user_array = np.array(user_pil, dtype=np.float32)
+                vinyl_array = np.array(vinyl_pil, dtype=np.float32)
+                
+                # More color-preserving vinyl texture blend
+                vinyl_strength = 0.4
+                
+                # Convert to HSV to preserve hue and saturation
+                user_hsv = user_pil.convert('HSV')
+                user_hsv_array = np.array(user_hsv, dtype=np.float32)
+                
+                # Apply vinyl texture only to the V (brightness) channel
+                vinyl_gray = np.mean(vinyl_array, axis=2)
+                vinyl_brightness_effect = (vinyl_gray - 128) * vinyl_strength * 0.5
+                
+                # Apply effect only to brightness channel
+                user_hsv_array[:, :, 2] = np.clip(user_hsv_array[:, :, 2] + vinyl_brightness_effect, 0, 255)
+                
+                # Convert back to RGB
+                result_hsv = PILImage.fromarray(user_hsv_array.astype('uint8'), 'HSV')
+                blended_pil = result_hsv.convert('RGB')
+                
+                # Minimal post-processing to maintain colors
+                enhancer = ImageEnhance.Contrast(blended_pil)
+                blended_pil = enhancer.enhance(1.02)
+                
+                return np.array(blended_pil)
+            else:
+                return user_frame
+        
+        # Apply vinyl blend effect
+        vinyl_blend_clip = user_image_clip.transform(create_vinyl_blend)
+        
+        # Create rotation effect
+        def rotate_func(get_frame, t):
+            frame = get_frame(t)
+            angle = (t * 12) % 360
+            
+            from PIL import Image as PILImage
+            import numpy as np
+            
+            pil_image = PILImage.fromarray(frame.astype('uint8'))
+            rotated = pil_image.rotate(-angle, expand=False, fillcolor=(0, 0, 0))
+            return np.array(rotated)
+        
+        # Apply rotation to the blended vinyl
+        spinning_clip = vinyl_blend_clip.transform(rotate_func)
+        
+        # Combine with audio
+        final_clip = spinning_clip.with_audio(audio_clip)
+        
+        # Write video with optimized settings
+        final_clip.write_videofile(
+            output_path,
+            codec="libx264",
+            audio_codec="aac",
+            bitrate="500k",
+            fps=24
+        )
+        
+        # Clean up clips
+        final_clip.close()
+        audio_clip.close()
+        user_image_clip.close()
+        vinyl_blend_clip.close()
+        spinning_clip.close()
+        
+        # Store output path for sending
+        context.user_data['vinyl_output_path'] = output_path
+        context.user_data['vinyl_duration'] = duration
+        context.user_data['vinyl_target_size'] = target_size
+        
+        return True
+        
+    except Exception as e:
+        print(f"Vinyl creation error: {e}")
+        return False
+
+# Send the completed vinyl video
+async def send_vinyl_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send the vinyl video as a video note"""
+    try:
+        output_path = context.user_data.get('vinyl_output_path', 'vinyl_video.mp4')
+        duration = context.user_data.get('vinyl_duration', 30)
+        target_size = context.user_data.get('vinyl_target_size', 512)
+        
+        if os.path.exists(output_path):
+            with open(output_path, 'rb') as video_file:
+                await update.message.reply_video_note(
+                    video_file,
+                    duration=int(duration),
+                    length=target_size
+                )
+            
+            await update.message.reply_text("🎵 Vinyl record created! Forward it to your channel.", reply_markup=markup)
+            
+            # Clean up output file
+            os.remove(output_path)
+        else:
+            await update.message.reply_text("Vinyl video file not found")
+            
+    except Exception as e:
+        await update.message.reply_text(f"Failed to send vinyl: {str(e)}")
+
+# Clean up vinyl files
+def cleanup_vinyl_files(context):
+    image_path = context.user_data.get('vinyl_image_path')
+    audio_path = context.user_data.get('vinyl_audio_path')
+    output_path = context.user_data.get('vinyl_output_path', 'vinyl_video.mp4')
+    
+    for path in [image_path, audio_path, output_path]:
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except:
+                pass  # Ignore cleanup errors
+    
+    # Clear from user data
+    context.user_data.pop('vinyl_image_path', None)
+    context.user_data.pop('vinyl_audio_path', None)
+    context.user_data.pop('vinyl_output_path', None)
+    context.user_data.pop('vinyl_duration', None)
+    context.user_data.pop('vinyl_target_size', None)
+
 # Cancel
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Clean up any vinyl files if in vinyl creation process
+    if context.user_data.get('state') in [VINYL_IMAGE, VINYL_AUDIO]:
+        cleanup_vinyl_files(context)
+    
     await update.message.reply_text("Operation cancelled. What next?", reply_markup=markup)
     context.user_data['state'] = CHOOSING
     return CHOOSING
 
-    
 # Main
 def main():
-    # Use environment variable for production, fallback to your token for development
-    
     app = ApplicationBuilder().token(TOKEN).build()
 
     conv_handler = ConversationHandler(
@@ -173,6 +469,16 @@ def main():
             ],
             VIDEO: [
                 MessageHandler(filters.VIDEO | filters.Document.VIDEO, process_video),
+                CommandHandler("menu", menu),
+                CommandHandler("stop", stop),
+            ],
+            VINYL_IMAGE: [
+                MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_vinyl_image),
+                CommandHandler("menu", menu),
+                CommandHandler("stop", stop),
+            ],
+            VINYL_AUDIO: [
+                MessageHandler(filters.AUDIO | filters.VOICE | filters.Document.AUDIO, handle_vinyl_audio),
                 CommandHandler("menu", menu),
                 CommandHandler("stop", stop),
             ],

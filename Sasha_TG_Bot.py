@@ -18,11 +18,14 @@ from telegram.ext import (
 )
 
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+
 # States
-CHOOSING, SHORTEN, VIDEO, VINYL_IMAGE, VINYL_AUDIO = range(5)
+CHOOSING, SHORTEN, VIDEO, VINYL_IMAGE, VINYL_AUDIO, UTM_URL, UTM_SOURCE, UTM_CAMPAIGN = range(8)
+
+UTM_SOURCE_CHOICE, UTM_CAMPAIGN_CHOICE = range(8, 10)
 
 # Keyboard
-reply_keyboard = [['Generate short URL', 'Generate round video', 'Create Vinyl', 'Stop session']]
+reply_keyboard = [['Generate short URL', 'Generate UTM short URL', 'Generate round video', 'Create Vinyl', 'Stop session']]
 markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True)
 
 # Start
@@ -44,7 +47,10 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             SHORTEN: "Waiting for URL", 
             VIDEO: "Waiting for Video",
             VINYL_IMAGE: "Waiting for Vinyl Image",
-            VINYL_AUDIO: "Waiting for Vinyl Audio"
+            VINYL_AUDIO: "Waiting for Vinyl Audio",
+            UTM_URL: "Waiting for UTM URL",
+            UTM_SOURCE: "Waiting for UTM Source",
+            UTM_CAMPAIGN: "Waiting for UTM Campaign"
         }
         current_state = state_map.get(context.user_data['state'], "Unknown")
     
@@ -68,6 +74,14 @@ async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await update.message.reply_text("Send the URL to shorten:", reply_markup=ReplyKeyboardRemove())
         context.user_data['state'] = SHORTEN
         return SHORTEN
+    elif choice == 'Generate UTM short URL':
+        await update.message.reply_text("🔗 Creating UTM tracking URL!\n\nFirst, send the URL you want to track:", reply_markup=ReplyKeyboardRemove())
+        context.user_data['state'] = UTM_URL
+        # Clear any previous UTM data
+        context.user_data.pop('utm_url', None)
+        context.user_data.pop('utm_source', None)
+        context.user_data.pop('utm_campaign', None)
+        return UTM_URL
     elif choice == 'Generate round video':
         await update.message.reply_text("Send a video (max 50MB, square, up to 1 minute):", reply_markup=ReplyKeyboardRemove())
         context.user_data['state'] = VIDEO
@@ -97,6 +111,237 @@ async def shorten_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     await update.message.reply_text("What next?", reply_markup=markup)
     context.user_data['state'] = CHOOSING
     return CHOOSING
+
+# Handle UTM URL input
+async def handle_utm_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    url = update.message.text.strip()
+    
+    # Basic URL validation
+    if not (url.startswith('http://') or url.startswith('https://')):
+        await update.message.reply_text("Please send a valid URL starting with http:// or https://")
+        return UTM_URL
+    
+    # Store the URL
+    context.user_data['utm_url'] = url
+    
+    # Create source selection keyboard
+    source_keyboard = [
+        ['Yandex', 'VK', 'Google'],
+        ['Enter custom value']
+    ]
+    source_markup = ReplyKeyboardMarkup(source_keyboard, one_time_keyboard=True, resize_keyboard=True)
+    
+    await update.message.reply_text("✅ URL received!\n\nSelect campaign source or choose to enter custom value:", reply_markup=source_markup)
+    context.user_data['state'] = UTM_SOURCE_CHOICE
+    return UTM_SOURCE_CHOICE
+
+# New function to handle source selection
+async def handle_utm_source_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    choice = update.message.text.strip()
+    
+    if choice in ['Yandex', 'VK', 'Google']:
+        # Store the selected source
+        context.user_data['utm_source'] = choice.lower()
+        return await proceed_to_campaign_choice(update, context)
+    elif choice == 'Enter custom value':
+        await update.message.reply_text("Enter your custom campaign source:", reply_markup=ReplyKeyboardRemove())
+        context.user_data['state'] = UTM_SOURCE
+        return UTM_SOURCE
+    else:
+        # Invalid choice, show options again
+        source_keyboard = [
+            ['Yandex', 'VK', 'Google'],
+            ['Enter custom value']
+        ]
+        source_markup = ReplyKeyboardMarkup(source_keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await update.message.reply_text("Please select from the options below:", reply_markup=source_markup)
+        return UTM_SOURCE_CHOICE
+
+# Handle UTM source input
+async def handle_utm_source(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    source = update.message.text.strip()
+    
+    if not source:
+        await update.message.reply_text("Please provide a campaign source (e.g., google, facebook, newsletter)")
+        return UTM_SOURCE
+    
+    # Store the source
+    context.user_data['utm_source'] = source.lower()
+    
+    return await proceed_to_campaign_choice(update, context)
+
+# New function to handle campaign choice setup
+async def proceed_to_campaign_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    url = context.user_data.get('utm_url', '')
+    
+    # Extract potential campaign name from URL
+    try:
+        from urllib.parse import urlparse
+        parsed_url = urlparse(url)
+        path_parts = parsed_url.path.strip('/').split('/')
+        suggested_campaign = path_parts[-1] if path_parts and path_parts[-1] else None
+        
+        if suggested_campaign:
+            # Create campaign choice keyboard
+            campaign_keyboard = [
+                [f'Use: {suggested_campaign}'],
+                ['Enter custom value']
+            ]
+            campaign_markup = ReplyKeyboardMarkup(campaign_keyboard, one_time_keyboard=True, resize_keyboard=True)
+            
+            context.user_data['suggested_campaign'] = suggested_campaign
+            
+            await update.message.reply_text(
+                f"✅ Campaign source received!\n\n"
+                f"I found '{suggested_campaign}' from your URL path.\n"
+                f"Would you like to use it as campaign name or enter your own?", 
+                reply_markup=campaign_markup
+            )
+        else:
+            # No suggestion available, go directly to custom input
+            await update.message.reply_text("✅ Campaign source received!\n\nNow send the campaign name (e.g., spring_sale, product_launch, holiday_promo):", reply_markup=ReplyKeyboardRemove())
+            context.user_data['state'] = UTM_CAMPAIGN
+            return UTM_CAMPAIGN
+            
+    except Exception:
+        # Error parsing URL, go to custom input
+        await update.message.reply_text("✅ Campaign source received!\n\nNow send the campaign name (e.g., spring_sale, product_launch, holiday_promo):", reply_markup=ReplyKeyboardRemove())
+        context.user_data['state'] = UTM_CAMPAIGN
+        return UTM_CAMPAIGN
+    
+    context.user_data['state'] = UTM_CAMPAIGN_CHOICE
+    return UTM_CAMPAIGN_CHOICE
+
+# New function to handle campaign choice
+async def handle_utm_campaign_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    choice = update.message.text.strip()
+    suggested_campaign = context.user_data.get('suggested_campaign', '')
+    
+    if choice == f'Use: {suggested_campaign}':
+        # Use the suggested campaign name
+        campaign = suggested_campaign
+    elif choice == 'Enter custom value':
+        await update.message.reply_text("Enter your custom campaign name:", reply_markup=ReplyKeyboardRemove())
+        context.user_data['state'] = UTM_CAMPAIGN
+        return UTM_CAMPAIGN
+    else:
+        # Invalid choice, show options again
+        campaign_keyboard = [
+            [f'Use: {suggested_campaign}'],
+            ['Enter custom value']
+        ]
+        campaign_markup = ReplyKeyboardMarkup(campaign_keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await update.message.reply_text("Please select from the options below:", reply_markup=campaign_markup)
+        return UTM_CAMPAIGN_CHOICE
+    
+    # Generate the final UTM URL
+    return await generate_utm_final_url(update, context, campaign)
+
+# New function to generate final UTM URL
+async def generate_utm_final_url(update: Update, context: ContextTypes.DEFAULT_TYPE, campaign: str) -> int:
+    try:
+        # Get stored data
+        base_url = context.user_data.get('utm_url')
+        utm_source = context.user_data.get('utm_source')
+        utm_campaign = campaign
+        
+        # Build UTM URL
+        utm_url = build_utm_url(base_url, utm_source, utm_campaign)
+        
+        # Shorten the UTM URL
+        short_url = pyshorteners.Shortener().tinyurl.short(utm_url)
+        
+        # Create response message
+        response_text = "🔗 UTM Tracking URL Created!\n\n"
+        response_text += f"📊 **Tracking Details:**\n"
+        response_text += f"• Source: `{utm_source}`\n"
+        response_text += f"• Campaign: `{utm_campaign}`\n\n"
+        response_text += f"🔗 **Full UTM URL:**\n`{utm_url}`\n\n"
+        response_text += f"✂️ **Shortened URL:**\n{short_url}"
+        
+        await update.message.reply_text(response_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        await update.message.reply_text(f"Error creating UTM URL: {str(e)}")
+    
+    # Clear UTM data
+    context.user_data.pop('utm_url', None)
+    context.user_data.pop('utm_source', None)
+    context.user_data.pop('utm_campaign', None)
+    context.user_data.pop('suggested_campaign', None)
+    
+    await update.message.reply_text("What next?", reply_markup=markup)
+    context.user_data['state'] = CHOOSING
+    return CHOOSING
+
+# Handle UTM campaign input and generate final URL
+async def handle_utm_campaign(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    campaign = update.message.text.strip()
+    
+    if not campaign:
+        await update.message.reply_text("Please provide a campaign name (e.g., spring_sale, product_launch)")
+        return UTM_CAMPAIGN
+    
+    try:
+        # Get stored data
+        base_url = context.user_data.get('utm_url')
+        utm_source = context.user_data.get('utm_source')
+        utm_campaign = campaign
+        
+        # Build UTM URL
+        utm_url = build_utm_url(base_url, utm_source, utm_campaign)
+        
+        # Shorten the UTM URL
+        short_url = pyshorteners.Shortener().tinyurl.short(utm_url)
+        
+        # Create response message
+        response_text = "🔗 UTM Tracking URL Created!\n\n"
+        response_text += f"📊 **Tracking Details:**\n"
+        response_text += f"• Source: `{utm_source}`\n"
+        response_text += f"• Campaign: `{utm_campaign}`\n\n"
+        response_text += f"🔗 **Full UTM URL:**\n`{utm_url}`\n\n"
+        response_text += f"✂️ **Shortened URL:**\n{short_url}"
+        
+        await update.message.reply_text(response_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        await update.message.reply_text(f"Error creating UTM URL: {str(e)}")
+    
+    # Clear UTM data
+    context.user_data.pop('utm_url', None)
+    context.user_data.pop('utm_source', None)
+    context.user_data.pop('utm_campaign', None)
+    
+    await update.message.reply_text("What next?", reply_markup=markup)
+    context.user_data['state'] = CHOOSING
+    return CHOOSING
+
+# Build UTM URL with parameters
+def build_utm_url(base_url: str, utm_source: str, utm_campaign: str) -> str:
+    """Build URL with UTM parameters"""
+    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+    
+    # Parse the URL
+    parsed = urlparse(base_url)
+    query_dict = parse_qs(parsed.query)
+    
+    # Add UTM parameters (convert to single values for urlencode)
+    utm_params = {
+        'utm_source': utm_source,
+        'utm_campaign': utm_campaign,
+        'utm_medium': 'telegram_bot'  # Default medium
+    }
+    
+    # Add UTM parameters to existing query parameters
+    for key, value in utm_params.items():
+        query_dict[key] = [value]  # parse_qs returns lists, so we need lists
+    
+    # Convert back to query string
+    new_query = urlencode(query_dict, doseq=True)
+    
+    # Rebuild URL
+    new_parsed = parsed._replace(query=new_query)
+    return urlunparse(new_parsed)
 
 # Handle video processing
 async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -445,6 +690,12 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if context.user_data.get('state') in [VINYL_IMAGE, VINYL_AUDIO]:
         cleanup_vinyl_files(context)
     
+    # Clean up UTM data if in UTM creation process
+    if context.user_data.get('state') in [UTM_URL, UTM_SOURCE, UTM_CAMPAIGN]:
+        context.user_data.pop('utm_url', None)
+        context.user_data.pop('utm_source', None)
+        context.user_data.pop('utm_campaign', None)
+    
     await update.message.reply_text("Operation cancelled. What next?", reply_markup=markup)
     context.user_data['state'] = CHOOSING
     return CHOOSING
@@ -478,6 +729,31 @@ def main():
             ],
             VINYL_AUDIO: [
                 MessageHandler(filters.AUDIO | filters.VOICE | filters.Document.AUDIO, handle_vinyl_audio),
+                CommandHandler("menu", menu),
+                CommandHandler("stop", stop),
+            ],
+            UTM_URL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_utm_url),
+                CommandHandler("menu", menu),
+                CommandHandler("stop", stop),
+            ],
+            UTM_SOURCE_CHOICE: [  # NEW STATE
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_utm_source_choice),
+                CommandHandler("menu", menu),
+                CommandHandler("stop", stop),
+            ],
+            UTM_SOURCE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_utm_source),
+                CommandHandler("menu", menu),
+                CommandHandler("stop", stop),
+            ],
+            UTM_CAMPAIGN_CHOICE: [  # NEW STATE
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_utm_campaign_choice),
+                CommandHandler("menu", menu),
+                CommandHandler("stop", stop),
+            ],
+            UTM_CAMPAIGN: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_utm_campaign),
                 CommandHandler("menu", menu),
                 CommandHandler("stop", stop),
             ],

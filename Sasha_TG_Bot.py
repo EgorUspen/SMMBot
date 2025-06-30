@@ -17,8 +17,7 @@ from telegram.ext import (
     ContextTypes, filters, ConversationHandler
 )
 
-# TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN','8160463472:AAGzZTjwp9oI4sjhsSU72OcoccELIYyNH5Q')
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 # States
 CHOOSING, SHORTEN, VIDEO, VINYL_IMAGE, VINYL_AUDIO = range(5)
 

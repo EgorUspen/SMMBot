@@ -329,7 +329,7 @@ def build_utm_url(base_url: str, utm_source: str, utm_campaign: str) -> str:
     utm_params = {
         'utm_source': utm_source,
         'utm_campaign': utm_campaign,
-        'utm_medium': 'telegram_bot'  # Default medium
+        'utm_medium': 'smm'  # Default medium
     }
     
     # Add UTM parameters to existing query parameters

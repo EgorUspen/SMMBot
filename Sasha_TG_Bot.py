@@ -93,7 +93,7 @@ async def choose_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         context.user_data.pop('vinyl_image_path', None)
         context.user_data.pop('vinyl_audio_path', None)
         return VINYL_IMAGE
-    elif choice == '⏹️':
+    elif choice == '🛑':
         return await stop(update, context)
     else:
         await update.message.reply_text("Choose a valid option.", reply_markup=markup)

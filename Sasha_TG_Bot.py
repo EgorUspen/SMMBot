@@ -8,6 +8,8 @@ import time
 import subprocess
 import numpy as np
 import asyncio
+import requests
+import json
 
 from telegram import (
     Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InputFile, Bot
@@ -18,11 +20,18 @@ from telegram.ext import (
 )
 
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+# TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', "Token for debug")
+
 
 # States
 CHOOSING, SHORTEN, VIDEO, VINYL_IMAGE, VINYL_AUDIO, UTM_URL, UTM_SOURCE, UTM_CAMPAIGN = range(8)
 
-UTM_SOURCE_CHOICE, UTM_CAMPAIGN_CHOICE = range(8, 10)
+UTM_SOURCE_CHOICE, UTM_CAMPAIGN_CHOICE, UTM_PLATFORM_CHOICE = range(8, 11)
+
+VK_ACCESS_TOKEN = os.getenv('VK_ACCESS_TOKEN')
+# VK_ACCESS_TOKEN = "token for debug"
+VK_API_VERSION = "5.199"
+VK_SHORTLINK_URL = "https://api.vk.com/method/utils.getShortLink"
 
 # Keyboard
 reply_keyboard = [['🔗', '🔗 UTM', '📷', '💿', '🛑']]
@@ -50,7 +59,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             VINYL_AUDIO: "Waiting for Vinyl Audio",
             UTM_URL: "Waiting for UTM URL",
             UTM_SOURCE: "Waiting for UTM Source",
-            UTM_CAMPAIGN: "Waiting for UTM Campaign"
+            UTM_CAMPAIGN: "Waiting for UTM Campaign",
+            UTM_PLATFORM_CHOICE: "Choosing UTM Platform",
         }
         current_state = state_map.get(context.user_data['state'], "Unknown")
     
@@ -235,7 +245,133 @@ async def handle_utm_campaign_choice(update: Update, context: ContextTypes.DEFAU
         return UTM_CAMPAIGN_CHOICE
     
     # Generate the final UTM URL
-    return await generate_utm_final_url(update, context, campaign)
+    # return await generate_utm_final_url(update, context, campaign)
+    context.user_data['utm_campaign'] = campaign
+    return await proceed_to_platform_choice(update, context)
+
+async def proceed_to_platform_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Create platform selection keyboard
+    platform_keyboard = [
+        ['VK', 'Facebook'],
+        ['Other']
+    ]
+    platform_markup = ReplyKeyboardMarkup(platform_keyboard, one_time_keyboard=True, resize_keyboard=True)
+    
+    await update.message.reply_text(
+        "✅ Campaign details received!\n\n"
+        "Select the platform for URL shortening:",
+        reply_markup=platform_markup
+    )
+    
+    context.user_data['state'] = UTM_PLATFORM_CHOICE
+    return UTM_PLATFORM_CHOICE
+
+async def handle_utm_platform_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    choice = update.message.text.strip()
+    
+    if choice in ['VK', 'Facebook', 'Other']:
+        context.user_data['utm_platform'] = choice.lower()
+        
+        # Generate the final UTM URL based on platform
+        return await generate_utm_final_url_with_platform(update, context)
+    else:
+        # Invalid choice, show options again
+        platform_keyboard = [
+            ['VK', 'Facebook'],
+            ['Other']
+        ]
+        platform_markup = ReplyKeyboardMarkup(platform_keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await update.message.reply_text("Please select from the options below:", reply_markup=platform_markup)
+        return UTM_PLATFORM_CHOICE
+
+# New function to generate final UTM URL with platform-specific shortening
+async def generate_utm_final_url_with_platform(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        # Get stored data
+        base_url = context.user_data.get('utm_url')
+        utm_source = context.user_data.get('utm_source')
+        utm_campaign = context.user_data.get('utm_campaign')
+        platform = context.user_data.get('utm_platform')
+        
+        # Build UTM URL
+        utm_url = build_utm_url(base_url, utm_source, utm_campaign)
+        
+        # Send processing message
+        processing_msg = await update.message.reply_text("🔗 Creating your UTM tracking URL...")
+        
+        # Shorten the UTM URL based on platform
+        if platform == 'vk':
+            short_url = await shorten_with_vk_api(utm_url)
+            if not short_url:
+                # Fallback to TinyURL if VK API fails
+                short_url = pyshorteners.Shortener().tinyurl.short(utm_url)
+                platform_info = "VK (fallback to TinyURL)"
+            else:
+                platform_info = "VK"
+        else:
+            # Use TinyURL for Facebook and Other
+            short_url = pyshorteners.Shortener().tinyurl.short(utm_url)
+            platform_info = "TinyURL"
+        
+        # Delete processing message
+        try:
+            await processing_msg.delete()
+        except:
+            pass
+        
+        # Create response message
+        response_text = "🔗 UTM Tracking URL Created!\n\n"
+        response_text += f"📊 **Tracking Details:**\n"
+        response_text += f"• Source: `{utm_source}`\n"
+        response_text += f"• Campaign: `{utm_campaign}`\n"
+        response_text += f"• Platform: `{platform_info}`\n\n"
+        response_text += f"🔗 **Full UTM URL:**\n`{utm_url}`\n\n"
+        response_text += f"✂️ **Shortened URL:**\n{short_url}"
+        
+        await update.message.reply_text(response_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        await update.message.reply_text(f"Error creating UTM URL: {str(e)}")
+    
+    # Clear UTM data
+    context.user_data.pop('utm_url', None)
+    context.user_data.pop('utm_source', None)
+    context.user_data.pop('utm_campaign', None)
+    context.user_data.pop('utm_platform', None)
+    context.user_data.pop('suggested_campaign', None)
+    
+    await update.message.reply_text("What next?", reply_markup=markup)
+    context.user_data['state'] = CHOOSING
+    return CHOOSING
+
+# New function to shorten URL using VK API
+async def shorten_with_vk_api(url: str) -> str:
+    """Shorten URL using VK API"""
+    try:
+        params = {
+            'access_token': VK_ACCESS_TOKEN,
+            'v': VK_API_VERSION,
+            'url': url
+        }
+        
+        response = requests.get(VK_SHORTLINK_URL, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            # Check if response contains the expected structure
+            if 'response' in data and 'short_url' in data['response']:
+                return data['response']['short_url']
+            else:
+                print(f"VK API unexpected response format: {data}")
+                return None
+        else:
+            print(f"VK API request failed with status {response.status_code}")
+            return None
+            
+    except Exception as e:
+        print(f"VK API error: {e}")
+        return None
 
 # New function to generate final UTM URL
 async def generate_utm_final_url(update: Update, context: ContextTypes.DEFAULT_TYPE, campaign: str) -> int:
@@ -275,6 +411,47 @@ async def generate_utm_final_url(update: Update, context: ContextTypes.DEFAULT_T
     return CHOOSING
 
 # Handle UTM campaign input and generate final URL
+# async def handle_utm_campaign(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+#     campaign = update.message.text.strip()
+    
+#     if not campaign:
+#         await update.message.reply_text("Please provide a campaign name (e.g., spring_sale, product_launch)")
+#         return UTM_CAMPAIGN
+    
+#     try:
+#         # Get stored data
+#         base_url = context.user_data.get('utm_url')
+#         utm_source = context.user_data.get('utm_source')
+#         utm_campaign = campaign
+        
+#         # Build UTM URL
+#         utm_url = build_utm_url(base_url, utm_source, utm_campaign)
+        
+#         # Shorten the UTM URL
+#         short_url = pyshorteners.Shortener().tinyurl.short(utm_url)
+        
+#         # Create response message
+#         response_text = "🔗 UTM Tracking URL Created!\n\n"
+#         response_text += f"📊 **Tracking Details:**\n"
+#         response_text += f"• Source: `{utm_source}`\n"
+#         response_text += f"• Campaign: `{utm_campaign}`\n\n"
+#         response_text += f"🔗 **Full UTM URL:**\n`{utm_url}`\n\n"
+#         response_text += f"✂️ **Shortened URL:**\n{short_url}"
+        
+#         await update.message.reply_text(response_text, parse_mode='Markdown')
+        
+#     except Exception as e:
+#         await update.message.reply_text(f"Error creating UTM URL: {str(e)}")
+    
+#     # Clear UTM data
+#     context.user_data.pop('utm_url', None)
+#     context.user_data.pop('utm_source', None)
+#     context.user_data.pop('utm_campaign', None)
+    
+#     await update.message.reply_text("What next?", reply_markup=markup)
+#     context.user_data['state'] = CHOOSING
+#     return CHOOSING
+
 async def handle_utm_campaign(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     campaign = update.message.text.strip()
     
@@ -282,39 +459,9 @@ async def handle_utm_campaign(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Please provide a campaign name (e.g., spring_sale, product_launch)")
         return UTM_CAMPAIGN
     
-    try:
-        # Get stored data
-        base_url = context.user_data.get('utm_url')
-        utm_source = context.user_data.get('utm_source')
-        utm_campaign = campaign
-        
-        # Build UTM URL
-        utm_url = build_utm_url(base_url, utm_source, utm_campaign)
-        
-        # Shorten the UTM URL
-        short_url = pyshorteners.Shortener().tinyurl.short(utm_url)
-        
-        # Create response message
-        response_text = "🔗 UTM Tracking URL Created!\n\n"
-        response_text += f"📊 **Tracking Details:**\n"
-        response_text += f"• Source: `{utm_source}`\n"
-        response_text += f"• Campaign: `{utm_campaign}`\n\n"
-        response_text += f"🔗 **Full UTM URL:**\n`{utm_url}`\n\n"
-        response_text += f"✂️ **Shortened URL:**\n{short_url}"
-        
-        await update.message.reply_text(response_text, parse_mode='Markdown')
-        
-    except Exception as e:
-        await update.message.reply_text(f"Error creating UTM URL: {str(e)}")
-    
-    # Clear UTM data
-    context.user_data.pop('utm_url', None)
-    context.user_data.pop('utm_source', None)
-    context.user_data.pop('utm_campaign', None)
-    
-    await update.message.reply_text("What next?", reply_markup=markup)
-    context.user_data['state'] = CHOOSING
-    return CHOOSING
+    # Store campaign and proceed to platform selection
+    context.user_data['utm_campaign'] = campaign
+    return await proceed_to_platform_choice(update, context)
 
 # Build UTM URL with parameters
 def build_utm_url(base_url: str, utm_source: str, utm_campaign: str) -> str:
@@ -695,6 +842,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         context.user_data.pop('utm_url', None)
         context.user_data.pop('utm_source', None)
         context.user_data.pop('utm_campaign', None)
+        context.user_data.pop('utm_platform', None)
+        context.user_data.pop('suggested_campaign', None)
     
     await update.message.reply_text("Operation cancelled. What next?", reply_markup=markup)
     context.user_data['state'] = CHOOSING
@@ -754,6 +903,11 @@ def main():
             ],
             UTM_CAMPAIGN: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_utm_campaign),
+                CommandHandler("menu", menu),
+                CommandHandler("stop", stop),
+            ],
+            UTM_PLATFORM_CHOICE: [  # ADD THIS MISSING STATE
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_utm_platform_choice),
                 CommandHandler("menu", menu),
                 CommandHandler("stop", stop),
             ],
